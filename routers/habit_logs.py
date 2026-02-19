@@ -9,16 +9,20 @@
 # habit_logs(user_id, routine_id, log_date, period, status, note)
 #
 # KEY BEHAVIOUR:
-# - Uses ON DUPLICATE KEY UPDATE so a user can "change their mind" for a day:
+# - Uses an UPSERT so a user can "change their mind" for a day:
 #   e.g., set Skipped -> later set Completed, without creating duplicates.
+#
+#   Postgres/Supabase version:
+#   - Requires a UNIQUE constraint on (user_id, log_date, period) (or whatever key you choose)
+#   - Uses: ON CONFLICT (...) DO UPDATE
 #
 # SECURITY:
 # - Requires authentication using Depends(current_user).
-# - User_id always comes from the JWT (not from the client payload).
+# - user_id always comes from the JWT (not from the client payload).
 #
 # References:
 # - FastAPI dependencies: https://fastapi.tiangolo.com/tutorial/dependencies/
-# - MySQL ON DUPLICATE KEY UPDATE: https://dev.mysql.com/doc/refman/8.0/en/insert-on-duplicate.html
+# - Postgres UPSERT (ON CONFLICT): https://www.postgresql.org/docs/current/sql-insert.html#SQL-ON-CONFLICT
 # - datetime date/timedelta: https://docs.python.org/3/library/datetime.html
 
 from datetime import date, timedelta
@@ -44,8 +48,8 @@ def create_habit_log(payload: HabitLogIn, user: DBUser = Depends(current_user)):
     - log_date: optional (defaults to today)
 
     Implementation detail:
-    - MySQL unique constraint should exist on (user_id, routine_id, log_date, period)
-      to make ON DUPLICATE KEY UPDATE behave correctly.
+    - Postgres UNIQUE constraint should exist on (user_id, log_date, period)
+      so ON CONFLICT behaves correctly.
     """
     period = payload.period.upper().strip()
     status_val = payload.status.capitalize().strip()
@@ -56,7 +60,14 @@ def create_habit_log(payload: HabitLogIn, user: DBUser = Depends(current_user)):
     if status_val not in {"Completed", "Skipped"}:
         raise HTTPException(status_code=400, detail="status must be 'Completed' or 'Skipped'")
 
-    log_date = payload.log_date or date.today()
+    log_date_val = payload.log_date or date.today()
+
+    # NOTE:
+    # Your Render error showed routine_id=None being passed.
+    # If your habit_logs.routine_id column is NOT NULL, this will cause a 500.
+    # We fail fast with a clear 400 so the mobile bug is easier to spot.
+    if payload.routine_id is None:
+        raise HTTPException(status_code=400, detail="routine_id is required for habit logging")
 
     with engine.begin() as conn:
         conn.execute(
@@ -64,22 +75,24 @@ def create_habit_log(payload: HabitLogIn, user: DBUser = Depends(current_user)):
                 """
                 INSERT INTO habit_logs (user_id, routine_id, log_date, period, status, note)
                 VALUES (:u, :r, :d, :p, :s, :n)
-                ON DUPLICATE KEY UPDATE
-                    status = VALUES(status),
-                    note   = VALUES(note)
+                ON CONFLICT (user_id, log_date, period)
+                DO UPDATE SET
+                    routine_id = EXCLUDED.routine_id,
+                    status     = EXCLUDED.status,
+                    note       = EXCLUDED.note
                 """
             ),
             {
-                "u": user.user_id,                     # always from JWT
-                "r": payload.routine_id,               # routine being tracked
-                "d": log_date,                         # date being tracked (defaults today)
-                "p": period,                           # AM/PM
-                "s": status_val,                       # Completed/Skipped
+                "u": user.user_id,                          # always from JWT
+                "r": payload.routine_id,                    # routine being tracked
+                "d": log_date_val,                          # date being tracked (defaults today)
+                "p": period,                                # AM/PM
+                "s": status_val,                            # Completed/Skipped
                 "n": (payload.note or "").strip() or None,  # optional note
             },
         )
 
-    return {"ok": True, "log_date": log_date, "period": period, "status": status_val}
+    return {"ok": True, "log_date": log_date_val, "period": period, "status": status_val}
 
 
 @router.get("/habit-logs")
