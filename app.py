@@ -36,6 +36,15 @@ from routers.users import router as users_router
 
 app = FastAPI(title="DermaFlow API")
 
+
+# --- Root route (nice UX for Render) -----------------------------------------
+# Render will ping "/" sometimes. Having a simple root route avoids 404s and
+# gives a quick "is the API up?" response in a browser.
+@app.get("/")
+def root():
+    return {"name": "DermaFlow API", "status": "running"}
+
+
 # --- CORS (DEV) --------------------------------------------------------------
 # Allows the Expo app (running on phone / simulator) to call the API.
 # In production this should be locked down to trusted origins.
