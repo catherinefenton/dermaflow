@@ -1,91 +1,65 @@
-import os, json
-from datetime import datetime
-from typing import List, Optional
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
-from sqlalchemy import create_engine, text
-from dotenv import load_dotenv
+# app.py — DermaFlow API main entry (modular)
+# Student: Catherine Fenton — 122308571
+#
+# PURPOSE:
+# - Central FastAPI entry point that wires up:
+#   - CORS (so the Expo app can call the API during development)
+#   - /static file serving (step photos live in backend/static/steps)
+#   - Modular routers for each feature area (auth, routines, uploads, etc.)
+#
+# ARCHITECTURE:
+# - Each feature lives in a router inside /routers, which keeps app.py clean.
+# - DB connection is handled separately in db.py (SQLAlchemy engine).
+#
+# SECURITY NOTE:
+# - allow_origins=["*"] is dev-only. In production, this should be restricted to your
+#   deployment domains (Iteration 4 hardening).
+#
+# References:
+# - FastAPI: https://fastapi.tiangolo.com/
+# - CORS Middleware: https://fastapi.tiangolo.com/tutorial/cors/
+# - StaticFiles: https://fastapi.tiangolo.com/tutorial/static-files/
 
-load_dotenv()
-DB_URL = os.getenv("DB_URL")
-if not DB_URL:
-    raise RuntimeError("DB_URL not set in .env")
+from pathlib import Path
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
-engine = create_engine(DB_URL, pool_pre_ping=True)
+from routers.health import router as health_router
+from routers.auth_routes import router as auth_router
+from routers.routines import router as routines_router
+from routers.uploads import router as uploads_router
+from routers.me import router as me_router
+from routers.habit_logs import router as habit_router
+from routers.step_completions import router as completions_router
+from routers.users import router as users_router
+
 app = FastAPI(title="DermaFlow API")
 
-@app.get("/health")
-def health():
-    with engine.connect() as conn:
-        conn.execute(text("SELECT 1"))
-    return {"status": "ok"}
+# --- CORS (DEV) --------------------------------------------------------------
+# Allows the Expo app (running on phone / simulator) to call the API.
+# In production this should be locked down to trusted origins.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # dev-only wildcard
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-class UserIn(BaseModel):
-    email: str
-    name: Optional[str] = None
-    skin_type: Optional[str] = None
+# --- Static hosting for uploaded photos --------------------------------------
+# Uploaded step photos are saved in /static/steps and served as:
+#   http://<API_HOST>:8000/static/steps/<filename>
+STATIC_DIR = Path(__file__).parent / "static"
+STATIC_DIR.mkdir(parents=True, exist_ok=True)
+app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
-@app.post("/users")
-def create_user(user: UserIn):
-    with engine.begin() as conn:
-        res = conn.execute(
-            text("""INSERT INTO users(email, name, skin_type)
-                    VALUES (:e,:n,:s)"""),
-            {"e": user.email, "n": user.name, "s": user.skin_type}
-        )
-        user_id = res.lastrowid
-    return {"id": user_id, **user.model_dump()}
-
-@app.get("/users/{user_id}")
-def get_user(user_id: int):
-    with engine.connect() as conn:
-        row = conn.execute(
-            text("""SELECT id,email,name,skin_type,created_at
-                    FROM users WHERE id=:id"""),
-            {"id": user_id}
-        ).m.fetchone()
-    if not row:
-        raise HTTPException(404, "User not found")
-    return dict(row._mapping)
-
-class RoutineIn(BaseModel):
-    user_id: int
-    name: str
-    period: str  # AM, PM, CUSTOM
-    steps: List[str]
-
-@app.post("/routines")
-def create_routine(r: RoutineIn):
-    steps_json = json.dumps(r.steps)
-    with engine.begin() as conn:
-        res = conn.execute(
-            text("""INSERT INTO routines(user_id,name,period,steps)
-                    VALUES (:u,:n,:p,:s)"""),
-            {"u": r.user_id, "n": r.name, "p": r.period, "s": steps_json}
-        )
-        rid = res.lastrowid
-    return {"id": rid, **r.model_dump()}
-
-@app.get("/routines/{routine_id}")
-def get_routine(routine_id: int):
-    with engine.connect() as conn:
-        row = conn.execute(
-            text("""SELECT id,user_id,name,period,steps
-                    FROM routines WHERE id=:id"""),
-            {"id": routine_id}
-        ).m.fetchone()
-    if not row:
-        raise HTTPException(404, "Routine not found")
-    data = dict(row._mapping)
-    data["steps"] = json.loads(data["steps"])
-    return data
-
-@app.post("/progress/log")
-def log_progress(user_id: int, routine_id: int, notes: Optional[str] = None):
-    with engine.begin() as conn:
-        conn.execute(
-            text("""INSERT INTO progress_logs(user_id,routine_id,completed_at,notes)
-                    VALUES (:u,:r,:t,:n)"""),
-            {"u": user_id, "r": routine_id, "t": datetime.utcnow(), "n": notes}
-        )
-    return {"ok": True}
+# --- Routers (feature modules) -----------------------------------------------
+app.include_router(health_router)       # /health (sanity check / uptime)
+app.include_router(auth_router)         # /auth/login, /auth/register
+app.include_router(me_router)           # /me profile
+app.include_router(users_router)        # /users (debug/testing)
+app.include_router(routines_router)     # /routines + /routine-steps
+app.include_router(habit_router)        # /habit-logs
+app.include_router(completions_router)  # /step-completions
+app.include_router(uploads_router)      # /routine-steps/{id}/photo (POST/DELETE)
