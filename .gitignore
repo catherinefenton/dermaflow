@@ -7,6 +7,12 @@
 # python
 __pycache__/
 *.pyc
+.venv/
 
 # pycharm
 .idea/
+
+# monorepo folders you don't want in API repo
+dermaflow-mobile@1.0.0/
+expo/
+static/
