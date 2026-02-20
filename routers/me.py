@@ -4,6 +4,7 @@
 # PURPOSE:
 # - GET /me: return the current user profile (id, name, email, created_at, skin_type label).
 # - PUT /me: update profile fields (name + skin type).
+# - DELETE /me: delete the currently authenticated user (hard delete).
 #
 # SECURITY:
 # - Uses Depends(current_user) so user identity comes from the JWT, not from the client payload.
@@ -14,13 +15,15 @@
 # - skin_type_id_for_from_any(): accepts either a skin type code or label/free text,
 #   and falls back to "other" to avoid null/invalid entries.
 # - UPDATE uses COALESCE so missing fields do not overwrite existing values.
+# - DELETE is implemented as a hard delete for demo simplicity. Related data is removed via
+#   ON DELETE CASCADE foreign keys (verified in Supabase for habit_logs/routines/step_completions).
 #
 # References:
 # - FastAPI dependencies: https://fastapi.tiangolo.com/tutorial/dependencies/
 # - SQLAlchemy text() queries: https://docs.sqlalchemy.org/en/20/core/sqlelement.html#sqlalchemy.sql.expression.text
 # - MySQL CONCAT_WS(): https://dev.mysql.com/doc/refman/8.0/en/string-functions.html#function_concat-ws
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import text
 
 from db import engine
@@ -138,10 +141,11 @@ def me_update(payload: ProfileUpdateIn, user: DBUser = Depends(current_user)):
             label_or_free_text=payload.skin_type,
         )
 
+        # IMPORTANT: use the correct table name (public.app_users), not "users".
         conn.execute(
             text(
                 """
-                UPDATE users
+                UPDATE public.app_users
                 SET first_name   = COALESCE(:fn, first_name),
                     last_name    = COALESCE(:ln, last_name),
                     skin_type_id = COALESCE(:stid, skin_type_id)
@@ -152,3 +156,35 @@ def me_update(payload: ProfileUpdateIn, user: DBUser = Depends(current_user)):
         )
 
     return me_get(user)
+
+
+@router.delete("/me", status_code=204)
+def me_delete(user: DBUser = Depends(current_user)):
+    """
+    Permanently delete the current user's account (hard delete).
+
+    NOTE:
+    - This will succeed if dependent tables use ON DELETE CASCADE foreign keys.
+      In Supabase, CASCADE was verified for:
+        - habit_logs.user_id -> app_users.user_id
+        - routines.user_id -> app_users.user_id
+        - step_completions.user_id -> app_users.user_id
+    - After deletion, the mobile client should clear local auth token and return to Welcome/Login.
+    """
+    with engine.begin() as conn:
+        # Ensure user exists (clean error)
+        exists = conn.execute(
+            text("SELECT 1 FROM public.app_users WHERE user_id = :id"),
+            {"id": user.user_id},
+        ).first()
+
+        if not exists:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        # Hard delete user row (dependent data removed by FK cascades)
+        conn.execute(
+            text("DELETE FROM public.app_users WHERE user_id = :id"),
+            {"id": user.user_id},
+        )
+
+    return
